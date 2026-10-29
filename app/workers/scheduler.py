@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def make_idempotency_key(job_id):
+    value = f"fero-idempotency-v1:{job_id}".encode("utf-8")
+    return "fero-v1-" + hashlib.sha256(value).hexdigest()
 
 
 class Worker:
@@ -74,6 +80,7 @@ class Worker:
             response = self.http_client.post(
                 url,
                 json=payload,
+                headers={"Idempotency-Key": make_idempotency_key(job.id)},
                 timeout=self.worker_settings.http_timeout_seconds,
             )
 

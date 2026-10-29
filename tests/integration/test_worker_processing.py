@@ -276,3 +276,60 @@ def test_unexpected_exception_recovers_after_lease(factory):
     assert retry is None
     assert lock is None
     assert error is None
+
+
+
+def expected_idempotency_key(job_id):
+    import hashlib
+
+    value = f"fero-idempotency-v1:{job_id}".encode("utf-8")
+    return "fero-v1-" + hashlib.sha256(value).hexdigest()
+
+
+def test_idempotency_key_matches_job_id(factory):
+    job_id = create_job(factory)
+    received_keys = []
+
+    def handler(request):
+        received_keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(200)
+
+    assert execute(factory, handler) is True
+    assert received_keys == [expected_idempotency_key(job_id)]
+
+
+def test_idempotency_key_stays_stable_across_retries(factory):
+    from datetime import timedelta
+
+    job_id = create_job(factory)
+    received_keys = []
+    responses = iter([503, 200])
+
+    def handler(request):
+        received_keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(next(responses))
+
+    assert execute(factory, handler, at=NOW) is True
+    assert execute(
+        factory,
+        handler,
+        at=NOW + timedelta(seconds=3),
+    ) is True
+
+    assert received_keys == [expected_idempotency_key(job_id), expected_idempotency_key(job_id)]
+
+
+def test_different_jobs_have_different_idempotency_keys(factory):
+    first_id = create_job(factory)
+    second_id = create_job(factory)
+    received_keys = []
+
+    def handler(request):
+        received_keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(200)
+
+    assert execute(factory, handler) is True
+    assert execute(factory, handler) is True
+
+    assert len(received_keys) == 2
+    assert set(received_keys) == {expected_idempotency_key(first_id), expected_idempotency_key(second_id)}
