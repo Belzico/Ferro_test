@@ -1,0 +1,219 @@
+﻿{
+  "info": {
+    "name": "FERO - Retry Scheduler - Jobs API",
+    "description": "Manual API tests for FERO Retry Scheduler. Run requests in order. The Create Job request automatically saves the generated jobId as a collection variable. Worker processing is not implemented yet, so newly created jobs remain pending.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "01 - Create Job (201)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://httpbin.org/post\",\n  \"payload\": {\n    \"event\": \"order.created\",\n    \"order_id\": 12345,\n    \"customer\": \"test-user\",\n    \"amount\": 99.99\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/jobs/",
+        "description": "Creates a pending job. Stores its UUID in the collection variable jobId."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 201 Created', function () {",
+              "    pm.response.to.have.status(201);",
+              "});",
+              "",
+              "pm.test('Response contains a valid UUID and pending status', function () {",
+              "    const data = pm.response.json();",
+              "    pm.expect(data.id).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);",
+              "    pm.expect(data.status).to.eql('pending');",
+              "    pm.expect(Object.keys(data).sort()).to.eql(['id', 'status']);",
+              "});",
+              "",
+              "if (pm.response.code === 201) {",
+              "    const data = pm.response.json();",
+              "    if (data.id && data.status === 'pending') {",
+              "        pm.collectionVariables.set('jobId', data.id);",
+              "        console.log('Saved jobId:', data.id);",
+              "    }",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Get Created Job (200)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/jobs/{{jobId}}/",
+        "description": "Retrieves the job created by request 01."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Job ID matches the created job', function () {",
+              "    const data = pm.response.json();",
+              "    pm.expect(data.id).to.eql(pm.collectionVariables.get('jobId'));",
+              "});",
+              "",
+              "pm.test('New job is pending with zero attempts', function () {",
+              "    const data = pm.response.json();",
+              "    pm.expect(data.status).to.eql('pending');",
+              "    pm.expect(data.attempts).to.eql(0);",
+              "    pm.expect(data.next_retry_at).to.be.null;",
+              "});",
+              "",
+              "pm.test('Response contains exactly the expected fields', function () {",
+              "    const data = pm.response.json();",
+              "    pm.expect(Object.keys(data).sort()).to.eql(['attempts', 'id', 'next_retry_at', 'status']);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 - Get Unknown Job (404)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/jobs/non-existent-job/",
+        "description": "Verifies that an unknown job returns HTTP 404."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 404 Not Found', function () {",
+              "    pm.response.to.have.status(404);",
+              "});",
+              "",
+              "pm.test('Returns the expected error', function () {",
+              "    pm.expect(pm.response.json().detail).to.eql('Job not found');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 - Create Job Invalid URL (422)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"esto-no-es-una-url\",\n  \"payload\": {\n    \"test\": true\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/jobs/",
+        "description": "Verifies validation rejects an invalid URL."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 422 Unprocessable Entity', function () {",
+              "    pm.response.to.have.status(422);",
+              "});",
+              "",
+              "pm.test('Returns validation details', function () {",
+              "    const data = pm.response.json();",
+              "    pm.expect(data.detail).to.be.an('array').that.is.not.empty;",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 - Create Job Missing Payload (422)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://httpbin.org/post\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/jobs/",
+        "description": "Verifies that payload is required."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 422 Unprocessable Entity', function () {",
+              "    pm.response.to.have.status(422);",
+              "});",
+              "",
+              "pm.test('Validation identifies the missing payload', function () {",
+              "    const data = pm.response.json();",
+              "    pm.expect(data.detail.some(error => error.loc.includes('payload'))).to.be.true;",
+              "});"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "jobId",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}
