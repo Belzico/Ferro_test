@@ -1,12 +1,12 @@
-﻿{
+{
   "info": {
-    "name": "FERO - Retry Scheduler - Jobs API",
-    "description": "Manual API tests for FERO Retry Scheduler. Run requests in order. The Create Job request automatically saves the generated jobId as a collection variable. Worker processing is not implemented yet, so newly created jobs remain pending.",
+    "name": "FERO - Complete API and Worker Integration Tests",
+    "description": "Full API validation and real HTTP integration suite. Requires FastAPI and the worker running. Run the entire collection with Postman Collection Runner in the defined order. Verification requests poll until the expected terminal job state or 120 checks. IMPORTANT: Collection Runner must use a delay of 1000 ms between requests. This allows backoff retries to progress without exhausting polling attempts.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
     {
-      "name": "01 - Create Job (201)",
+      "name": "01A - Create - Postman Echo - HTTP 200",
       "request": {
         "method": "POST",
         "header": [
@@ -15,17 +15,16 @@
             "value": "application/json"
           }
         ],
+        "url": "{{baseUrl}}/jobs/",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"url\": \"https://httpbin.org/post\",\n  \"payload\": {\n    \"event\": \"order.created\",\n    \"order_id\": 12345,\n    \"customer\": \"test-user\",\n    \"amount\": 99.99\n  }\n}",
+          "raw": "{\n  \"url\": \"https://postman-echo.com/post\",\n  \"payload\": {\n    \"source\": \"FERO Postman Integration Tests\",\n    \"scenario\": \"Postman Echo - HTTP 200\",\n    \"test_number\": 1\n  }\n}",
           "options": {
             "raw": {
               "language": "json"
             }
           }
-        },
-        "url": "{{baseUrl}}/jobs/",
-        "description": "Creates a pending job. Stores its UUID in the collection variable jobId."
+        }
       },
       "event": [
         {
@@ -37,19 +36,21 @@
               "    pm.response.to.have.status(201);",
               "});",
               "",
-              "pm.test('Response contains a valid UUID and pending status', function () {",
-              "    const data = pm.response.json();",
-              "    pm.expect(data.id).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);",
-              "    pm.expect(data.status).to.eql('pending');",
-              "    pm.expect(Object.keys(data).sort()).to.eql(['id', 'status']);",
+              "const data = pm.response.json();",
+              "",
+              "pm.test('Valid job UUID', function () {",
+              "    pm.expect(data.id).to.match(",
+              "        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i",
+              "    );",
               "});",
               "",
-              "if (pm.response.code === 201) {",
-              "    const data = pm.response.json();",
-              "    if (data.id && data.status === 'pending') {",
-              "        pm.collectionVariables.set('jobId', data.id);",
-              "        console.log('Saved jobId:', data.id);",
-              "    }",
+              "pm.test('Initial status pending', function () {",
+              "    pm.expect(data.status).to.eql('pending');",
+              "});",
+              "",
+              "if (pm.response.code === 201 && data.id) {",
+              "    pm.collectionVariables.set('scenario1_id', data.id);",
+              "    pm.collectionVariables.set('scenario1_polls', '0');",
               "}"
             ]
           }
@@ -57,12 +58,11 @@
       ]
     },
     {
-      "name": "02 - Get Created Job (200)",
+      "name": "01B - Verify - Postman Echo - HTTP 200",
       "request": {
         "method": "GET",
         "header": [],
-        "url": "{{baseUrl}}/jobs/{{jobId}}/",
-        "description": "Retrieves the job created by request 01."
+        "url": "{{baseUrl}}/jobs/{{scenario1_id}}/"
       },
       "event": [
         {
@@ -70,25 +70,767 @@
           "script": {
             "type": "text/javascript",
             "exec": [
+              "const data = pm.response.json();",
+              "const expectedStatus = 'completed';",
+              "const expectedAttempts = 1;",
+              "const jobId = pm.collectionVariables.get('scenario1_id');",
+              "const startedKey = 'scenario1_started';",
+              "const started = Number(pm.collectionVariables.get(startedKey) || Date.now());",
+              "",
+              "pm.collectionVariables.set(startedKey, String(started));",
+              "",
               "pm.test('HTTP 200 OK', function () {",
               "    pm.response.to.have.status(200);",
               "});",
               "",
-              "pm.test('Job ID matches the created job', function () {",
-              "    const data = pm.response.json();",
-              "    pm.expect(data.id).to.eql(pm.collectionVariables.get('jobId'));",
+              "pm.test('Correct job ID', function () {",
+              "    pm.expect(data.id).to.eql(jobId);",
               "});",
               "",
-              "pm.test('New job is pending with zero attempts', function () {",
-              "    const data = pm.response.json();",
+              "pm.test('Valid job structure and attempt count', function () {",
+              "    pm.expect(Object.keys(data).sort()).to.eql(",
+              "        ['attempts', 'id', 'next_retry_at', 'status']",
+              "    );",
+              "    pm.expect(data.attempts).to.be.within(0, expectedAttempts);",
+              "});",
+              "",
+              "const finished = ['completed', 'failed', 'dead'].includes(data.status);",
+              "const elapsed = Date.now() - started;",
+              "const timeoutMs = 180000;",
+              "",
+              "if (finished) {",
+              "    pm.test('Expected final status', function () {",
+              "        pm.expect(data.status).to.eql(expectedStatus);",
+              "    });",
+              "",
+              "    pm.test('Expected final attempt count', function () {",
+              "        pm.expect(data.attempts).to.eql(expectedAttempts);",
+              "    });",
+              "",
+              "    pm.test('No retry after terminal status', function () {",
+              "        pm.expect(data.next_retry_at).to.be.null;",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else if (elapsed >= timeoutMs) {",
+              "    pm.test('Job finished within 180 seconds', function () {",
+              "        pm.expect.fail(",
+              "            'Timeout: status=' + data.status +",
+              "            ', attempts=' + data.attempts",
+              "        );",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else {",
+              "    pm.test('Job is awaiting processing or retry', function () {",
+              "        pm.expect(['pending', 'running']).to.include(data.status);",
+              "    });",
+              "",
+              "    // The sandbox waits for the timer before proceeding to the next request.",
+              "    pm.execution.setNextRequest('01B - Verify - Postman Echo - HTTP 200');",
+              "    setTimeout(function () {}, 1500);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "02A - Create - HTTPBin - HTTP 200",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/jobs/",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://httpbin.org/post\",\n  \"payload\": {\n    \"source\": \"FERO Postman Integration Tests\",\n    \"scenario\": \"HTTPBin - HTTP 200\",\n    \"test_number\": 2\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 201 Created', function () {",
+              "    pm.response.to.have.status(201);",
+              "});",
+              "",
+              "const data = pm.response.json();",
+              "",
+              "pm.test('Valid job UUID', function () {",
+              "    pm.expect(data.id).to.match(",
+              "        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i",
+              "    );",
+              "});",
+              "",
+              "pm.test('Initial status pending', function () {",
               "    pm.expect(data.status).to.eql('pending');",
-              "    pm.expect(data.attempts).to.eql(0);",
-              "    pm.expect(data.next_retry_at).to.be.null;",
               "});",
               "",
-              "pm.test('Response contains exactly the expected fields', function () {",
+              "if (pm.response.code === 201 && data.id) {",
+              "    pm.collectionVariables.set('scenario2_id', data.id);",
+              "    pm.collectionVariables.set('scenario2_polls', '0');",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "02B - Verify - HTTPBin - HTTP 200",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/jobs/{{scenario2_id}}/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const data = pm.response.json();",
+              "const expectedStatus = 'completed';",
+              "const expectedAttempts = 1;",
+              "const jobId = pm.collectionVariables.get('scenario2_id');",
+              "const startedKey = 'scenario2_started';",
+              "const started = Number(pm.collectionVariables.get(startedKey) || Date.now());",
+              "",
+              "pm.collectionVariables.set(startedKey, String(started));",
+              "",
+              "pm.test('HTTP 200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Correct job ID', function () {",
+              "    pm.expect(data.id).to.eql(jobId);",
+              "});",
+              "",
+              "pm.test('Valid job structure and attempt count', function () {",
+              "    pm.expect(Object.keys(data).sort()).to.eql(",
+              "        ['attempts', 'id', 'next_retry_at', 'status']",
+              "    );",
+              "    pm.expect(data.attempts).to.be.within(0, expectedAttempts);",
+              "});",
+              "",
+              "const finished = ['completed', 'failed', 'dead'].includes(data.status);",
+              "const elapsed = Date.now() - started;",
+              "const timeoutMs = 180000;",
+              "",
+              "if (finished) {",
+              "    pm.test('Expected final status', function () {",
+              "        pm.expect(data.status).to.eql(expectedStatus);",
+              "    });",
+              "",
+              "    pm.test('Expected final attempt count', function () {",
+              "        pm.expect(data.attempts).to.eql(expectedAttempts);",
+              "    });",
+              "",
+              "    pm.test('No retry after terminal status', function () {",
+              "        pm.expect(data.next_retry_at).to.be.null;",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else if (elapsed >= timeoutMs) {",
+              "    pm.test('Job finished within 180 seconds', function () {",
+              "        pm.expect.fail(",
+              "            'Timeout: status=' + data.status +",
+              "            ', attempts=' + data.attempts",
+              "        );",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else {",
+              "    pm.test('Job is awaiting processing or retry', function () {",
+              "        pm.expect(['pending', 'running']).to.include(data.status);",
+              "    });",
+              "",
+              "    // The sandbox waits for the timer before proceeding to the next request.",
+              "    pm.execution.setNextRequest('02B - Verify - HTTPBin - HTTP 200');",
+              "    setTimeout(function () {}, 1500);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "03A - Create - HTTPBin - HTTP 400",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/jobs/",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://httpbin.org/status/400\",\n  \"payload\": {\n    \"source\": \"FERO Postman Integration Tests\",\n    \"scenario\": \"HTTPBin - HTTP 400\",\n    \"test_number\": 3\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 201 Created', function () {",
+              "    pm.response.to.have.status(201);",
+              "});",
+              "",
+              "const data = pm.response.json();",
+              "",
+              "pm.test('Valid job UUID', function () {",
+              "    pm.expect(data.id).to.match(",
+              "        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i",
+              "    );",
+              "});",
+              "",
+              "pm.test('Initial status pending', function () {",
+              "    pm.expect(data.status).to.eql('pending');",
+              "});",
+              "",
+              "if (pm.response.code === 201 && data.id) {",
+              "    pm.collectionVariables.set('scenario3_id', data.id);",
+              "    pm.collectionVariables.set('scenario3_polls', '0');",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "03B - Verify - HTTPBin - HTTP 400",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/jobs/{{scenario3_id}}/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const data = pm.response.json();",
+              "const expectedStatus = 'failed';",
+              "const expectedAttempts = 1;",
+              "const jobId = pm.collectionVariables.get('scenario3_id');",
+              "const startedKey = 'scenario3_started';",
+              "const started = Number(pm.collectionVariables.get(startedKey) || Date.now());",
+              "",
+              "pm.collectionVariables.set(startedKey, String(started));",
+              "",
+              "pm.test('HTTP 200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Correct job ID', function () {",
+              "    pm.expect(data.id).to.eql(jobId);",
+              "});",
+              "",
+              "pm.test('Valid job structure and attempt count', function () {",
+              "    pm.expect(Object.keys(data).sort()).to.eql(",
+              "        ['attempts', 'id', 'next_retry_at', 'status']",
+              "    );",
+              "    pm.expect(data.attempts).to.be.within(0, expectedAttempts);",
+              "});",
+              "",
+              "const finished = ['completed', 'failed', 'dead'].includes(data.status);",
+              "const elapsed = Date.now() - started;",
+              "const timeoutMs = 180000;",
+              "",
+              "if (finished) {",
+              "    pm.test('Expected final status', function () {",
+              "        pm.expect(data.status).to.eql(expectedStatus);",
+              "    });",
+              "",
+              "    pm.test('Expected final attempt count', function () {",
+              "        pm.expect(data.attempts).to.eql(expectedAttempts);",
+              "    });",
+              "",
+              "    pm.test('No retry after terminal status', function () {",
+              "        pm.expect(data.next_retry_at).to.be.null;",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else if (elapsed >= timeoutMs) {",
+              "    pm.test('Job finished within 180 seconds', function () {",
+              "        pm.expect.fail(",
+              "            'Timeout: status=' + data.status +",
+              "            ', attempts=' + data.attempts",
+              "        );",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else {",
+              "    pm.test('Job is awaiting processing or retry', function () {",
+              "        pm.expect(['pending', 'running']).to.include(data.status);",
+              "    });",
+              "",
+              "    // The sandbox waits for the timer before proceeding to the next request.",
+              "    pm.execution.setNextRequest('03B - Verify - HTTPBin - HTTP 400');",
+              "    setTimeout(function () {}, 1500);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "04A - Create - HTTPBin - HTTP 429",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/jobs/",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://httpbin.org/status/429\",\n  \"payload\": {\n    \"source\": \"FERO Postman Integration Tests\",\n    \"scenario\": \"HTTPBin - HTTP 429\",\n    \"test_number\": 4\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 201 Created', function () {",
+              "    pm.response.to.have.status(201);",
+              "});",
+              "",
+              "const data = pm.response.json();",
+              "",
+              "pm.test('Valid job UUID', function () {",
+              "    pm.expect(data.id).to.match(",
+              "        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i",
+              "    );",
+              "});",
+              "",
+              "pm.test('Initial status pending', function () {",
+              "    pm.expect(data.status).to.eql('pending');",
+              "});",
+              "",
+              "if (pm.response.code === 201 && data.id) {",
+              "    pm.collectionVariables.set('scenario4_id', data.id);",
+              "    pm.collectionVariables.set('scenario4_polls', '0');",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "04B - Verify - HTTPBin - HTTP 429",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/jobs/{{scenario4_id}}/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const data = pm.response.json();",
+              "const expectedStatus = 'dead';",
+              "const expectedAttempts = 5;",
+              "const jobId = pm.collectionVariables.get('scenario4_id');",
+              "const startedKey = 'scenario4_started';",
+              "const started = Number(pm.collectionVariables.get(startedKey) || Date.now());",
+              "",
+              "pm.collectionVariables.set(startedKey, String(started));",
+              "",
+              "pm.test('HTTP 200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Correct job ID', function () {",
+              "    pm.expect(data.id).to.eql(jobId);",
+              "});",
+              "",
+              "pm.test('Valid job structure and attempt count', function () {",
+              "    pm.expect(Object.keys(data).sort()).to.eql(",
+              "        ['attempts', 'id', 'next_retry_at', 'status']",
+              "    );",
+              "    pm.expect(data.attempts).to.be.within(0, expectedAttempts);",
+              "});",
+              "",
+              "const finished = ['completed', 'failed', 'dead'].includes(data.status);",
+              "const elapsed = Date.now() - started;",
+              "const timeoutMs = 180000;",
+              "",
+              "if (finished) {",
+              "    pm.test('Expected final status', function () {",
+              "        pm.expect(data.status).to.eql(expectedStatus);",
+              "    });",
+              "",
+              "    pm.test('Expected final attempt count', function () {",
+              "        pm.expect(data.attempts).to.eql(expectedAttempts);",
+              "    });",
+              "",
+              "    pm.test('No retry after terminal status', function () {",
+              "        pm.expect(data.next_retry_at).to.be.null;",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else if (elapsed >= timeoutMs) {",
+              "    pm.test('Job finished within 180 seconds', function () {",
+              "        pm.expect.fail(",
+              "            'Timeout: status=' + data.status +",
+              "            ', attempts=' + data.attempts",
+              "        );",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else {",
+              "    pm.test('Job is awaiting processing or retry', function () {",
+              "        pm.expect(['pending', 'running']).to.include(data.status);",
+              "    });",
+              "",
+              "    // The sandbox waits for the timer before proceeding to the next request.",
+              "    pm.execution.setNextRequest('04B - Verify - HTTPBin - HTTP 429');",
+              "    setTimeout(function () {}, 1500);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "05A - Create - HTTPBin - HTTP 500",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/jobs/",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://httpbin.org/status/500\",\n  \"payload\": {\n    \"source\": \"FERO Postman Integration Tests\",\n    \"scenario\": \"HTTPBin - HTTP 500\",\n    \"test_number\": 5\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 201 Created', function () {",
+              "    pm.response.to.have.status(201);",
+              "});",
+              "",
+              "const data = pm.response.json();",
+              "",
+              "pm.test('Valid job UUID', function () {",
+              "    pm.expect(data.id).to.match(",
+              "        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i",
+              "    );",
+              "});",
+              "",
+              "pm.test('Initial status pending', function () {",
+              "    pm.expect(data.status).to.eql('pending');",
+              "});",
+              "",
+              "if (pm.response.code === 201 && data.id) {",
+              "    pm.collectionVariables.set('scenario5_id', data.id);",
+              "    pm.collectionVariables.set('scenario5_polls', '0');",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "05B - Verify - HTTPBin - HTTP 500",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/jobs/{{scenario5_id}}/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const data = pm.response.json();",
+              "const expectedStatus = 'dead';",
+              "const expectedAttempts = 5;",
+              "const jobId = pm.collectionVariables.get('scenario5_id');",
+              "const startedKey = 'scenario5_started';",
+              "const started = Number(pm.collectionVariables.get(startedKey) || Date.now());",
+              "",
+              "pm.collectionVariables.set(startedKey, String(started));",
+              "",
+              "pm.test('HTTP 200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Correct job ID', function () {",
+              "    pm.expect(data.id).to.eql(jobId);",
+              "});",
+              "",
+              "pm.test('Valid job structure and attempt count', function () {",
+              "    pm.expect(Object.keys(data).sort()).to.eql(",
+              "        ['attempts', 'id', 'next_retry_at', 'status']",
+              "    );",
+              "    pm.expect(data.attempts).to.be.within(0, expectedAttempts);",
+              "});",
+              "",
+              "const finished = ['completed', 'failed', 'dead'].includes(data.status);",
+              "const elapsed = Date.now() - started;",
+              "const timeoutMs = 180000;",
+              "",
+              "if (finished) {",
+              "    pm.test('Expected final status', function () {",
+              "        pm.expect(data.status).to.eql(expectedStatus);",
+              "    });",
+              "",
+              "    pm.test('Expected final attempt count', function () {",
+              "        pm.expect(data.attempts).to.eql(expectedAttempts);",
+              "    });",
+              "",
+              "    pm.test('No retry after terminal status', function () {",
+              "        pm.expect(data.next_retry_at).to.be.null;",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else if (elapsed >= timeoutMs) {",
+              "    pm.test('Job finished within 180 seconds', function () {",
+              "        pm.expect.fail(",
+              "            'Timeout: status=' + data.status +",
+              "            ', attempts=' + data.attempts",
+              "        );",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else {",
+              "    pm.test('Job is awaiting processing or retry', function () {",
+              "        pm.expect(['pending', 'running']).to.include(data.status);",
+              "    });",
+              "",
+              "    // The sandbox waits for the timer before proceeding to the next request.",
+              "    pm.execution.setNextRequest('05B - Verify - HTTPBin - HTTP 500');",
+              "    setTimeout(function () {}, 1500);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "06A - Create - HTTPBin - HTTP 503",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/jobs/",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://httpbin.org/status/503\",\n  \"payload\": {\n    \"source\": \"FERO Postman Integration Tests\",\n    \"scenario\": \"HTTPBin - HTTP 503\",\n    \"test_number\": 6\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 201 Created', function () {",
+              "    pm.response.to.have.status(201);",
+              "});",
+              "",
+              "const data = pm.response.json();",
+              "",
+              "pm.test('Valid job UUID', function () {",
+              "    pm.expect(data.id).to.match(",
+              "        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i",
+              "    );",
+              "});",
+              "",
+              "pm.test('Initial status pending', function () {",
+              "    pm.expect(data.status).to.eql('pending');",
+              "});",
+              "",
+              "if (pm.response.code === 201 && data.id) {",
+              "    pm.collectionVariables.set('scenario6_id', data.id);",
+              "    pm.collectionVariables.set('scenario6_polls', '0');",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "06B - Verify - HTTPBin - HTTP 503",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/jobs/{{scenario6_id}}/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const data = pm.response.json();",
+              "const expectedStatus = 'dead';",
+              "const expectedAttempts = 5;",
+              "const jobId = pm.collectionVariables.get('scenario6_id');",
+              "const startedKey = 'scenario6_started';",
+              "const started = Number(pm.collectionVariables.get(startedKey) || Date.now());",
+              "",
+              "pm.collectionVariables.set(startedKey, String(started));",
+              "",
+              "pm.test('HTTP 200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Correct job ID', function () {",
+              "    pm.expect(data.id).to.eql(jobId);",
+              "});",
+              "",
+              "pm.test('Valid job structure and attempt count', function () {",
+              "    pm.expect(Object.keys(data).sort()).to.eql(",
+              "        ['attempts', 'id', 'next_retry_at', 'status']",
+              "    );",
+              "    pm.expect(data.attempts).to.be.within(0, expectedAttempts);",
+              "});",
+              "",
+              "const finished = ['completed', 'failed', 'dead'].includes(data.status);",
+              "const elapsed = Date.now() - started;",
+              "const timeoutMs = 180000;",
+              "",
+              "if (finished) {",
+              "    pm.test('Expected final status', function () {",
+              "        pm.expect(data.status).to.eql(expectedStatus);",
+              "    });",
+              "",
+              "    pm.test('Expected final attempt count', function () {",
+              "        pm.expect(data.attempts).to.eql(expectedAttempts);",
+              "    });",
+              "",
+              "    pm.test('No retry after terminal status', function () {",
+              "        pm.expect(data.next_retry_at).to.be.null;",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else if (elapsed >= timeoutMs) {",
+              "    pm.test('Job finished within 180 seconds', function () {",
+              "        pm.expect.fail(",
+              "            'Timeout: status=' + data.status +",
+              "            ', attempts=' + data.attempts",
+              "        );",
+              "    });",
+              "",
+              "    pm.collectionVariables.unset(startedKey);",
+              "",
+              "} else {",
+              "    pm.test('Job is awaiting processing or retry', function () {",
+              "        pm.expect(['pending', 'running']).to.include(data.status);",
+              "    });",
+              "",
+              "    // The sandbox waits for the timer before proceeding to the next request.",
+              "    pm.execution.setNextRequest('06B - Verify - HTTPBin - HTTP 503');",
+              "    setTimeout(function () {}, 1500);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Validation - Invalid URL",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/jobs/",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"not-a-valid-url\",\n  \"payload\": {\n    \"test\": true\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 422 Unprocessable Entity', function () {",
+              "    pm.response.to.have.status(422);",
+              "});",
+              "",
+              "pm.test('Validation errors returned', function () {",
               "    const data = pm.response.json();",
-              "    pm.expect(Object.keys(data).sort()).to.eql(['attempts', 'id', 'next_retry_at', 'status']);",
+              "    pm.expect(data.detail).to.be.an('array').that.is.not.empty;",
               "});"
             ]
           }
@@ -96,12 +838,211 @@
       ]
     },
     {
-      "name": "03 - Get Unknown Job (404)",
+      "name": "Validation - Missing Payload",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/jobs/",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://httpbin.org/post\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 422 Unprocessable Entity', function () {",
+              "    pm.response.to.have.status(422);",
+              "});",
+              "",
+              "pm.test('Validation errors returned', function () {",
+              "    const data = pm.response.json();",
+              "    pm.expect(data.detail).to.be.an('array').that.is.not.empty;",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Validation - Payload Is Array",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/jobs/",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://httpbin.org/post\",\n  \"payload\": [\n    1,\n    2,\n    3\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 422 Unprocessable Entity', function () {",
+              "    pm.response.to.have.status(422);",
+              "});",
+              "",
+              "pm.test('Validation errors returned', function () {",
+              "    const data = pm.response.json();",
+              "    pm.expect(data.detail).to.be.an('array').that.is.not.empty;",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Validation - Extra Field",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/jobs/",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://httpbin.org/post\",\n  \"payload\": {},\n  \"unexpected_field\": \"invalid\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 422 Unprocessable Entity', function () {",
+              "    pm.response.to.have.status(422);",
+              "});",
+              "",
+              "pm.test('Validation errors returned', function () {",
+              "    const data = pm.response.json();",
+              "    pm.expect(data.detail).to.be.an('array').that.is.not.empty;",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Validation - Unsupported FTP URL",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/jobs/",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"ftp://example.com/file\",\n  \"payload\": {}\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 422 Unprocessable Entity', function () {",
+              "    pm.response.to.have.status(422);",
+              "});",
+              "",
+              "pm.test('Validation errors returned', function () {",
+              "    const data = pm.response.json();",
+              "    pm.expect(data.detail).to.be.an('array').that.is.not.empty;",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Validation - Missing URL",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/jobs/",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"payload\": {\n    \"test\": true\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 422 Unprocessable Entity', function () {",
+              "    pm.response.to.have.status(422);",
+              "});",
+              "",
+              "pm.test('Validation errors returned', function () {",
+              "    const data = pm.response.json();",
+              "    pm.expect(data.detail).to.be.an('array').that.is.not.empty;",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Validation - Unknown Job (404)",
       "request": {
         "method": "GET",
         "header": [],
-        "url": "{{baseUrl}}/jobs/non-existent-job/",
-        "description": "Verifies that an unknown job returns HTTP 404."
+        "url": "{{baseUrl}}/jobs/non-existent-job/"
       },
       "event": [
         {
@@ -113,90 +1054,8 @@
               "    pm.response.to.have.status(404);",
               "});",
               "",
-              "pm.test('Returns the expected error', function () {",
+              "pm.test('Correct not-found message', function () {",
               "    pm.expect(pm.response.json().detail).to.eql('Job not found');",
-              "});"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "04 - Create Job Invalid URL (422)",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"url\": \"esto-no-es-una-url\",\n  \"payload\": {\n    \"test\": true\n  }\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        },
-        "url": "{{baseUrl}}/jobs/",
-        "description": "Verifies validation rejects an invalid URL."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('HTTP 422 Unprocessable Entity', function () {",
-              "    pm.response.to.have.status(422);",
-              "});",
-              "",
-              "pm.test('Returns validation details', function () {",
-              "    const data = pm.response.json();",
-              "    pm.expect(data.detail).to.be.an('array').that.is.not.empty;",
-              "});"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "05 - Create Job Missing Payload (422)",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"url\": \"https://httpbin.org/post\"\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        },
-        "url": "{{baseUrl}}/jobs/",
-        "description": "Verifies that payload is required."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('HTTP 422 Unprocessable Entity', function () {",
-              "    pm.response.to.have.status(422);",
-              "});",
-              "",
-              "pm.test('Validation identifies the missing payload', function () {",
-              "    const data = pm.response.json();",
-              "    pm.expect(data.detail.some(error => error.loc.includes('payload'))).to.be.true;",
               "});"
             ]
           }
@@ -208,11 +1067,6 @@
     {
       "key": "baseUrl",
       "value": "http://127.0.0.1:8000",
-      "type": "string"
-    },
-    {
-      "key": "jobId",
-      "value": "",
       "type": "string"
     }
   ]

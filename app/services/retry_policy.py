@@ -45,6 +45,11 @@ class RetryPolicy:
         """Maximum number of execution attempts."""
         return self._config.max_attempts
     
+    @property
+    def retryable_status_codes(self) -> frozenset[int]:
+        """HTTP statuses configured as transient."""
+        return frozenset(self._config.retryable_status_codes)
+
     def should_retry(
         self,
         attempt: int,
