@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
+from app.config import RetrySettings
 
 
 class TransportFailure(Enum):
@@ -20,25 +21,29 @@ class RetryPolicy:
     """Deterministic retry policy for HTTP requests.
     
     Rules:
-    - Retry HTTP 429, 500, and 503 status codes
+    - Retry HTTP status codes specified in configuration
     - Retry transport failures (connection errors, timeouts)
-    - Do not retry non-transient errors (400, 404, etc.)
-    - Maximum 5 total execution attempts (attempts 1-5)
-    - Exponential backoff: 2, 4, 8, 16 seconds for attempts 1-4
-    - No retries after attempt 5
+    - Do not retry non-transient errors (not in retryable list)
+    - Maximum execution attempts from configuration
+    - Exponential backoff: delay = min(initial_delay * multiplier^(attempt-1), max_delay)
+    - No retries after max attempts
     - Attempt must be an integer >= 1 (booleans, floats, strings, None rejected)
     - Must provide exactly one of: status_code or transport_failure
     - Status codes must be integers between 100 and 599 (booleans rejected)
     """
     
-    MAX_ATTEMPTS = 5
-    RETRYABLE_STATUS_CODES = {429, 500, 503}
-    BACKOFF_SECONDS = [2, 4, 8, 16]
+    def __init__(self, config: RetrySettings):
+        """Initialize retry policy with configuration.
+        
+        Args:
+            config: RetrySettings containing retry configuration
+        """
+        self._config = config
     
     @property
     def max_attempts(self) -> int:
         """Maximum number of execution attempts."""
-        return self.MAX_ATTEMPTS
+        return self._config.max_attempts
     
     def should_retry(
         self,
@@ -89,15 +94,25 @@ class RetryPolicy:
                 raise ValueError("transport_failure must be a TransportFailure enum")
         
         # Check if we've exceeded max attempts
-        if attempt >= self.MAX_ATTEMPTS:
+        if attempt >= self._config.max_attempts:
             return RetryDecision(should_retry=False)
         
         # Determine if retry is warranted based on status code or transport failure
         if status_code is not None:
-            if status_code not in self.RETRYABLE_STATUS_CODES:
+            if status_code not in self._config.retryable_status_codes:
                 return RetryDecision(should_retry=False)
         
-        # Calculate backoff for this attempt (attempts 1-4 map to indices 0-3)
-        backoff_index = attempt - 1
-        backoff = self.BACKOFF_SECONDS[backoff_index]
-        return RetryDecision(should_retry=True, next_backoff_seconds=backoff)
+        # Calculate backoff using bounded exponential formula with cap
+        # Stops multiplying once the cap is reached to avoid large exponent computations
+        delay = self._config.initial_delay_seconds
+        
+        for _ in range(attempt - 1):
+            if delay >= self._config.max_delay_seconds:
+                break
+            
+            delay = min(
+                delay * self._config.backoff_multiplier,
+                self._config.max_delay_seconds
+            )
+        
+        return RetryDecision(should_retry=True, next_backoff_seconds=delay)
